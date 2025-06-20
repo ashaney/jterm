@@ -83,6 +83,7 @@ struct JTermApp {
     show_map: bool,
     show_stats: bool,
     show_detail: bool,
+    show_alt_map: bool,
     list_state: ratatui::widgets::ListState,
     map_scroll: u16,
     map_selected_index: usize,
@@ -105,6 +106,7 @@ impl JTermApp {
             show_map: false,
             show_stats: false,
             show_detail: false,
+            show_alt_map: false,
             list_state,
             map_scroll: 0,
             map_selected_index: 0,
@@ -672,10 +674,17 @@ fn run_app<B: Backend>(
                 KeyCode::Char('m') => {
                     app.show_map = !app.show_map;
                     app.show_stats = false;
+                    app.show_alt_map = false;
                 },
                 KeyCode::Char('s') => {
                     app.show_stats = !app.show_stats;
                     app.show_map = false;
+                    app.show_alt_map = false;
+                },
+                KeyCode::Char('w') => {
+                    app.show_alt_map = !app.show_alt_map;
+                    app.show_map = false;
+                    app.show_stats = false;
                 },
                 KeyCode::Up | KeyCode::Char('k') => {
                     if app.show_map {
@@ -772,6 +781,8 @@ fn ui(f: &mut Frame, app: &JTermApp) {
         render_map_view(f, app);
     } else if app.show_stats {
         render_stats_view(f, app);
+    } else if app.show_alt_map {
+        render_alt_map_view(f, app);
     } else {
         render_list_view(f, app);
     }
@@ -846,9 +857,9 @@ fn render_list_view(f: &mut Frame, app: &JTermApp) {
     }
 
     let help_text = if app.show_help {
-        "Controls:\n\n↑/↓ or j/k: Navigate\nEnter: Show prefecture details\n0-5: Set experience level\nm: Toggle map view\ns: Toggle stats view\nh/F1: Toggle this help\nq: Quit\n\nLevels:\n0: Never been there (Gray)\n1: Passed there (Blue)\n2: Alighted there (Cyan)\n3: Visited there (Green)\n4: Stayed there (Yellow)\n5: Lived there (Red)"
+        "Controls:\n\n↑/↓ or j/k: Navigate\nEnter: Show prefecture details\n0-5: Set experience level\nm: Toggle map view\nw: Toggle overview map\ns: Toggle stats view\nh/F1: Toggle this help\nq: Quit\n\nLevels:\n0: Never been there (⬜)\n1: Passed there (🟥)\n2: Alighted there (🟨)\n3: Visited there (🟩)\n4: Stayed there (🟪)\n5: Lived there (🟦)"
     } else {
-        "Press 'h' for help, 'm' for map, 's' for stats\nEnter for details, 0-5 for levels"
+        "Press 'h' for help, 'm' for map, 'w' for overview\n's' for stats, Enter for details, 0-5 for levels"
     };
 
     let help_paragraph = Paragraph::new(help_text)
@@ -1043,6 +1054,168 @@ fn render_stats_view(f: &mut Frame, app: &JTermApp) {
         .wrap(Wrap { trim: true });
 
     f.render_widget(help_paragraph, bottom_chunks[1]);
+}
+
+fn render_alt_map_view(f: &mut Frame, app: &JTermApp) {
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .margin(1)
+        .constraints([Constraint::Percentage(75), Constraint::Percentage(25)].as_ref())
+        .split(f.area());
+    
+    // Create a geographical layout of Japan using colored squares
+    let mut map_grid = vec![vec![" ".to_string(); 60]; 20]; // Adjusted for side-by-side layout
+    
+    // Helper function to get colored square for prefecture
+    let get_color_square = |name: &str| -> String {
+        let level = app.get_prefecture_level(name);
+        match level {
+            0 => "⬜".to_string(),
+            1 => "🟥".to_string(),
+            2 => "🟨".to_string(),
+            3 => "🟩".to_string(),
+            4 => "🟪".to_string(),
+            5 => "🟦".to_string(),
+            _ => "⬜".to_string(),
+        }
+    };
+    
+    // Shift everything right by ~15 spaces to center the map
+    let offset_x = 15;
+    
+    // Hokkaido (far north, centered)
+    map_grid[1][30 + offset_x] = get_color_square("Hokkaido");
+    
+    // Tohoku (northern Honshu, spread horizontally)
+    map_grid[3][28 + offset_x] = get_color_square("Aomori");
+    map_grid[4][32 + offset_x] = get_color_square("Iwate");
+    map_grid[4][24 + offset_x] = get_color_square("Akita");
+    map_grid[5][28 + offset_x] = get_color_square("Miyagi");
+    map_grid[5][24 + offset_x] = get_color_square("Yamagata");
+    map_grid[6][28 + offset_x] = get_color_square("Fukushima");
+    
+    // Kanto (Tokyo area, horizontally spread)
+    map_grid[7][24 + offset_x] = get_color_square("Tochigi");
+    map_grid[7][28 + offset_x] = get_color_square("Ibaraki");
+    map_grid[7][20 + offset_x] = get_color_square("Gunma");
+    map_grid[8][22 + offset_x] = get_color_square("Saitama");
+    map_grid[8][26 + offset_x] = get_color_square("Tokyo");
+    map_grid[8][30 + offset_x] = get_color_square("Chiba");
+    map_grid[9][26 + offset_x] = get_color_square("Kanagawa");
+    
+    // Chubu (central Japan, wide spread)
+    map_grid[6][18 + offset_x] = get_color_square("Niigata");
+    map_grid[8][14 + offset_x] = get_color_square("Toyama");
+    map_grid[8][10 + offset_x] = get_color_square("Ishikawa");
+    map_grid[9][10 + offset_x] = get_color_square("Fukui");
+    map_grid[8][18 + offset_x] = get_color_square("Nagano");
+    map_grid[9][22 + offset_x] = get_color_square("Yamanashi");
+    map_grid[9][14 + offset_x] = get_color_square("Gifu");
+    map_grid[10][22 + offset_x] = get_color_square("Shizuoka");
+    map_grid[10][14 + offset_x] = get_color_square("Aichi");
+    
+    // Kansai (Kyoto/Osaka area, spread wide)
+    map_grid[10][10 + offset_x] = get_color_square("Mie");
+    map_grid[9][8 + offset_x] = get_color_square("Shiga");
+    map_grid[8][6 + offset_x] = get_color_square("Kyoto");
+    map_grid[9][4 + offset_x] = get_color_square("Osaka");
+    map_grid[9][2 + offset_x] = get_color_square("Hyogo");
+    map_grid[10][6 + offset_x] = get_color_square("Nara");
+    map_grid[11][4 + offset_x] = get_color_square("Wakayama");
+    
+    // Chugoku (western Honshu, very wide)
+    map_grid[8][2 + offset_x] = get_color_square("Tottori");
+    map_grid[10][0 + offset_x] = get_color_square("Shimane");
+    map_grid[10][2 + offset_x] = get_color_square("Okayama");
+    map_grid[11][2 + offset_x] = get_color_square("Hiroshima");
+    map_grid[12][0 + offset_x] = get_color_square("Yamaguchi");
+    
+    // Shikoku (southern island, horizontally spread)
+    map_grid[12][4 + offset_x] = get_color_square("Kagawa");
+    map_grid[12][8 + offset_x] = get_color_square("Tokushima");
+    map_grid[12][2 + offset_x] = get_color_square("Ehime");
+    map_grid[13][4 + offset_x] = get_color_square("Kochi");
+    
+    // Kyushu (southwestern island, wide cluster)
+    map_grid[14][0 + offset_x] = get_color_square("Fukuoka");
+    map_grid[15][0 + offset_x] = get_color_square("Saga");
+    map_grid[16][0 + offset_x] = get_color_square("Nagasaki");
+    map_grid[15][2 + offset_x] = get_color_square("Kumamoto");
+    map_grid[14][4 + offset_x] = get_color_square("Oita");
+    map_grid[16][2 + offset_x] = get_color_square("Miyazaki");
+    map_grid[17][0 + offset_x] = get_color_square("Kagoshima");
+    
+    // Okinawa (far south)
+    map_grid[19][0 + offset_x] = get_color_square("Okinawa");
+    
+    // Convert grid to string
+    let mut map_lines = Vec::new();
+    
+    for row in &map_grid {
+        let line: String = row.iter().cloned().collect();
+        map_lines.push(line);
+    }
+    
+    let map_text = map_lines.join("\n");
+    
+    let map_paragraph = Paragraph::new(map_text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_set(border::ROUNDED)
+                .title("🗾 Japan Overview Map")
+        )
+        .style(Style::default().fg(FlexokiTheme::TX))
+        .wrap(Wrap { trim: false });
+    
+    f.render_widget(map_paragraph, chunks[0]);
+    
+    // Stats panel on the right
+    let stats = app.calculate_stats();
+    let visited_count = stats.total_prefectures - stats.level_counts[0];
+    let completion_percentage = (visited_count as f64 / stats.total_prefectures as f64 * 100.0) as u32;
+    
+    let stats_text = format!(
+        "📊 STATISTICS\n\n\
+        Total: {}\n\
+        Visited: {}\n\
+        Progress: {}%\n\n\
+        🟦 Lived: {}\n\
+        🟪 Stayed: {}\n\
+        🟩 Visited: {}\n\
+        🟨 Alighted: {}\n\
+        🟥 Passed: {}\n\
+        ⬜ Never: {}\n\n\
+        Legend:\n\
+        ⬜ Never been\n\
+        🟥 Passed there\n\
+        🟨 Alighted there\n\
+        🟩 Visited there\n\
+        🟪 Stayed there\n\
+        🟦 Lived there\n\n\
+        Press 'w' to return",
+        stats.total_prefectures,
+        visited_count,
+        completion_percentage,
+        stats.level_counts[5],
+        stats.level_counts[4],
+        stats.level_counts[3],
+        stats.level_counts[2],
+        stats.level_counts[1],
+        stats.level_counts[0]
+    );
+    
+    let stats_paragraph = Paragraph::new(stats_text)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_set(border::ROUNDED)
+                .title("Statistics & Legend")
+        )
+        .style(Style::default().fg(FlexokiTheme::TX))
+        .wrap(Wrap { trim: true });
+    
+    f.render_widget(stats_paragraph, chunks[1]);
 }
 
 fn render_detail_popup(f: &mut Frame, app: &JTermApp) {
