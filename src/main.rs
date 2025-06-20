@@ -122,11 +122,15 @@ impl JTermApp {
     }
 
     fn init_japan_map(&mut self) -> io::Result<()> {
-        // Initialize image picker with auto-detected font size and protocol
+        // Initialize image picker with better font size detection
         let mut picker = Picker::from_termios().unwrap_or_else(|_| {
-            // Use Ghostty terminal's font size (17pt) - assuming 17pt ≈ (11, 22) pixels
-            Picker::new((11, 22).into())
+            eprintln!("Failed to query terminal, using default picker with Ghostty-friendly font size");
+            Picker::new((14, 28).into()) // Better default for Ghostty 17pt font
         });
+        
+        // Debug output to verify what we detected
+        eprintln!("Protocol type: {:?}", picker.protocol_type);
+        eprintln!("Font size: {:?}", picker.font_size);
         
         // Try to load the transparent PNG file
         let img_path = "img/japanex_jterm.png";
@@ -673,14 +677,14 @@ fn save_user_progress(progress: &UserProgress) -> io::Result<()> {
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = JTermApp::new()?;
+    let _ = app.init_japan_map(); // Initialize Japan map image BEFORE raw mode
+    
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
-
-    let mut app = JTermApp::new()?;
-    let _ = app.init_japan_map(); // Initialize Japan map image (ignore errors)
     let res = run_app(&mut terminal, &mut app);
 
     disable_raw_mode()?;
