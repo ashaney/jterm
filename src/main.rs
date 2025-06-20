@@ -3,6 +3,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
+use chrono;
 use ratatui::{
     backend::{Backend, CrosstermBackend},
     layout::{Constraint, Direction, Layout},
@@ -11,6 +12,30 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
+
+// Flexoki Light theme colors
+#[allow(dead_code)]
+struct FlexokiTheme;
+
+#[allow(dead_code)]
+impl FlexokiTheme {
+    const BG: Color = Color::Rgb(252, 249, 243); // #fcf9f3
+    const FG: Color = Color::Rgb(16, 15, 13); // #100f0d
+    const UI: Color = Color::Rgb(215, 204, 183); // #d7ccb7
+    const UI2: Color = Color::Rgb(188, 174, 147); // #bcae93
+    const UI3: Color = Color::Rgb(162, 147, 118); // #a29376
+    const TX: Color = Color::Rgb(16, 15, 13); // #100f0d
+    const TX2: Color = Color::Rgb(87, 82, 74); // #57524a
+    const TX3: Color = Color::Rgb(162, 147, 118); // #a29376
+    const RE: Color = Color::Rgb(175, 75, 74); // #af4b4a
+    const OR: Color = Color::Rgb(188, 92, 51); // #bc5c33
+    const YE: Color = Color::Rgb(173, 135, 29); // #ad871d
+    const GR: Color = Color::Rgb(66, 130, 62); // #42823e
+    const CY: Color = Color::Rgb(36, 139, 142); // #248b8e
+    const BL: Color = Color::Rgb(72, 108, 166); // #486ca6
+    const PU: Color = Color::Rgb(137, 89, 168); // #8959a8
+    const MA: Color = Color::Rgb(204, 102, 153); // #cc6699
+}
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -61,6 +86,7 @@ struct JTermApp {
     list_state: ratatui::widgets::ListState,
     map_scroll: u16,
     map_selected_index: usize,
+    stats_scroll: u16,
 }
 
 impl JTermApp {
@@ -82,18 +108,19 @@ impl JTermApp {
             list_state,
             map_scroll: 0,
             map_selected_index: 0,
+            stats_scroll: 0,
         })
     }
 
     fn get_level_color(level: u8) -> Color {
         match level {
-            0 => Color::Gray,
-            1 => Color::Blue,
-            2 => Color::Cyan,
-            3 => Color::Green,
-            4 => Color::Yellow,
-            5 => Color::Red,
-            _ => Color::White,
+            0 => FlexokiTheme::TX,  // No change - use default text color
+            1 => FlexokiTheme::RE,  // Red
+            2 => FlexokiTheme::YE,  // Yellow
+            3 => FlexokiTheme::GR,  // Green
+            4 => FlexokiTheme::PU,  // Purple
+            5 => FlexokiTheme::BL,  // Blue
+            _ => FlexokiTheme::TX,
         }
     }
 
@@ -129,6 +156,68 @@ impl JTermApp {
         save_user_progress(&self.user_progress)
     }
 
+    fn export_to_json(&self) -> io::Result<()> {
+        let stats = self.calculate_stats();
+        let export_data = serde_json::json!({
+            "export_date": chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+            "total_prefectures": stats.total_prefectures,
+            "visited_count": stats.total_prefectures - stats.level_counts[0],
+            "total_score": stats.total_score,
+            "completion_percentage": ((stats.total_prefectures - stats.level_counts[0]) as f64 / stats.total_prefectures as f64 * 100.0) as u32,
+            "level_breakdown": {
+                "never_been": stats.level_counts[0],
+                "passed": stats.level_counts[1],
+                "alighted": stats.level_counts[2],
+                "visited": stats.level_counts[3],
+                "stayed": stats.level_counts[4],
+                "lived": stats.level_counts[5]
+            },
+            "regional_progress": stats.region_stats,
+            "prefecture_details": self.prefectures.iter().map(|p| {
+                serde_json::json!({
+                    "name_en": p.name_en,
+                    "name_jp": p.name_jp,
+                    "region": p.region,
+                    "level": self.get_prefecture_level(&p.name_en),
+                    "capital": p.capital,
+                    "population": p.population,
+                    "area_km2": p.area_km2
+                })
+            }).collect::<Vec<_>>()
+        });
+
+        let home_dir = dirs::home_dir().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Home directory not found"))?;
+        let export_path = home_dir.join("jterm_export.json");
+        fs::write(&export_path, serde_json::to_string_pretty(&export_data)?)?;
+        Ok(())
+    }
+
+    fn export_to_csv(&self) -> io::Result<()> {
+        let mut csv_content = String::new();
+        csv_content.push_str("Prefecture_EN,Prefecture_JP,Region,Level,Experience,Capital,Population,Area_km2\n");
+        
+        for prefecture in &self.prefectures {
+            let level = self.get_prefecture_level(&prefecture.name_en);
+            let experience = Self::get_level_text(level);
+            csv_content.push_str(&format!(
+                "{},{},{},{},{},{},{},{}\n",
+                prefecture.name_en,
+                prefecture.name_jp,
+                prefecture.region,
+                level,
+                experience,
+                prefecture.capital,
+                prefecture.population,
+                prefecture.area_km2
+            ));
+        }
+
+        let home_dir = dirs::home_dir().ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "Home directory not found"))?;
+        let export_path = home_dir.join("jterm_export.csv");
+        fs::write(&export_path, csv_content)?;
+        Ok(())
+    }
+
     fn render_map(&self) -> Vec<String> {
         let mut map_lines = Vec::new();
         let mut prefecture_index = 0;
@@ -137,8 +226,8 @@ impl JTermApp {
         map_lines.push("╭─────────────── HOKKAIDO REGION ─────────────────╮".to_string());
         let hokkaido_level = self.get_prefecture_level("Hokkaido");
         let hokkaido_color = match hokkaido_level {
-            0 => "⬜", 1 => "🟦", 2 => "🟦", 
-            3 => "🟩", 4 => "🟨", 5 => "🟥", _ => "⬜"
+            0 => "⬜", 1 => "🟥", 2 => "🟨", 
+            3 => "🟩", 4 => "🟪", 5 => "🟦", _ => "⬜"
         };
         let hokkaido_indicator = if prefecture_index == self.map_selected_index { "►" } else { " " };
         map_lines.push(format!(" {} {} Hokkaido (北海道) - Level {} ", hokkaido_indicator, hokkaido_color, hokkaido_level));
@@ -156,8 +245,8 @@ impl JTermApp {
         for (name_en, name_jp) in &tohoku_prefectures {
             let level = self.get_prefecture_level(name_en);
             let color = match level {
-                0 => "⬜", 1 => "🟦", 2 => "🟦", 
-                3 => "🟩", 4 => "🟨", 5 => "🟥", _ => "⬜"
+                0 => "⬜", 1 => "🟥", 2 => "🟨", 
+                3 => "🟩", 4 => "🟪", 5 => "🟦", _ => "⬜"
             };
             let indicator = if prefecture_index == self.map_selected_index { "►" } else { " " };
             map_lines.push(format!(" {} {} {:<8} ({}) - Level {} ", indicator, color, name_en, name_jp, level));
@@ -176,8 +265,8 @@ impl JTermApp {
         for (name_en, name_jp) in &kanto_prefectures {
             let level = self.get_prefecture_level(name_en);
             let color = match level {
-                0 => "⬜", 1 => "🟦", 2 => "🟦", 
-                3 => "🟩", 4 => "🟨", 5 => "🟥", _ => "⬜"
+                0 => "⬜", 1 => "🟥", 2 => "🟨", 
+                3 => "🟩", 4 => "🟪", 5 => "🟦", _ => "⬜"
             };
             let indicator = if prefecture_index == self.map_selected_index { "►" } else { " " };
             map_lines.push(format!(" {} {} {:<8} ({}) - Level {} ", indicator, color, name_en, name_jp, level));
@@ -197,8 +286,8 @@ impl JTermApp {
         for (name_en, name_jp) in &chubu_prefectures {
             let level = self.get_prefecture_level(name_en);
             let color = match level {
-                0 => "⬜", 1 => "🟦", 2 => "🟦", 
-                3 => "🟩", 4 => "🟨", 5 => "🟥", _ => "⬜"
+                0 => "⬜", 1 => "🟥", 2 => "🟨", 
+                3 => "🟩", 4 => "🟪", 5 => "🟦", _ => "⬜"
             };
             let indicator = if prefecture_index == self.map_selected_index { "►" } else { " " };
             map_lines.push(format!(" {} {} {:<8} ({}) - Level {} ", indicator, color, name_en, name_jp, level));
@@ -217,8 +306,8 @@ impl JTermApp {
         for (name_en, name_jp) in &kansai_prefectures {
             let level = self.get_prefecture_level(name_en);
             let color = match level {
-                0 => "⬜", 1 => "🟦", 2 => "🟦", 
-                3 => "🟩", 4 => "🟨", 5 => "🟥", _ => "⬜"
+                0 => "⬜", 1 => "🟥", 2 => "🟨", 
+                3 => "🟩", 4 => "🟪", 5 => "🟦", _ => "⬜"
             };
             let indicator = if prefecture_index == self.map_selected_index { "►" } else { " " };
             map_lines.push(format!(" {} {} {:<8} ({}) - Level {} ", indicator, color, name_en, name_jp, level));
@@ -237,8 +326,8 @@ impl JTermApp {
         for (name_en, name_jp) in &chugoku_prefectures {
             let level = self.get_prefecture_level(name_en);
             let color = match level {
-                0 => "⬜", 1 => "🟦", 2 => "🟦", 
-                3 => "🟩", 4 => "🟨", 5 => "🟥", _ => "⬜"
+                0 => "⬜", 1 => "🟥", 2 => "🟨", 
+                3 => "🟩", 4 => "🟪", 5 => "🟦", _ => "⬜"
             };
             let indicator = if prefecture_index == self.map_selected_index { "►" } else { " " };
             map_lines.push(format!(" {} {} {:<8} ({}) - Level {} ", indicator, color, name_en, name_jp, level));
@@ -256,8 +345,8 @@ impl JTermApp {
         for (name_en, name_jp) in &shikoku_prefectures {
             let level = self.get_prefecture_level(name_en);
             let color = match level {
-                0 => "⬜", 1 => "🟦", 2 => "🟦", 
-                3 => "🟩", 4 => "🟨", 5 => "🟥", _ => "⬜"
+                0 => "⬜", 1 => "🟥", 2 => "🟨", 
+                3 => "🟩", 4 => "🟪", 5 => "🟦", _ => "⬜"
             };
             let indicator = if prefecture_index == self.map_selected_index { "►" } else { " " };
             map_lines.push(format!(" {} {} {:<8} ({}) - Level {} ", indicator, color, name_en, name_jp, level));
@@ -276,8 +365,8 @@ impl JTermApp {
         for (name_en, name_jp) in &kyushu_prefectures {
             let level = self.get_prefecture_level(name_en);
             let color = match level {
-                0 => "⬜", 1 => "🟦", 2 => "🟦", 
-                3 => "🟩", 4 => "🟨", 5 => "🟥", _ => "⬜"
+                0 => "⬜", 1 => "🟥", 2 => "🟨", 
+                3 => "🟩", 4 => "🟪", 5 => "🟦", _ => "⬜"
             };
             let indicator = if prefecture_index == self.map_selected_index { "►" } else { " " };
             map_lines.push(format!(" {} {} {:<8} ({}) - Level {} ", indicator, color, name_en, name_jp, level));
@@ -290,8 +379,8 @@ impl JTermApp {
         map_lines.push("╭─────────────── OKINAWA REGION ──────────────────╮".to_string());
         let okinawa_level = self.get_prefecture_level("Okinawa");
         let okinawa_color = match okinawa_level {
-            0 => "⬜", 1 => "🟦", 2 => "🟦", 
-            3 => "🟩", 4 => "🟨", 5 => "🟥", _ => "⬜"
+            0 => "⬜", 1 => "🟥", 2 => "🟨", 
+            3 => "🟩", 4 => "🟪", 5 => "🟦", _ => "⬜"
         };
         let okinawa_indicator = if prefecture_index == self.map_selected_index { "►" } else { " " };
         map_lines.push(format!(" {} {} Okinawa (沖縄) - Level {} ", okinawa_indicator, okinawa_color, okinawa_level));
@@ -593,6 +682,10 @@ fn run_app<B: Backend>(
                         if app.map_scroll > 0 {
                             app.map_scroll -= 1;
                         }
+                    } else if app.show_stats {
+                        if app.stats_scroll > 0 {
+                            app.stats_scroll -= 1;
+                        }
                     } else if app.selected_index > 0 {
                         app.selected_index -= 1;
                         app.list_state.select(Some(app.selected_index));
@@ -600,7 +693,15 @@ fn run_app<B: Backend>(
                 }
                 KeyCode::Down | KeyCode::Char('j') => {
                     if app.show_map {
-                        app.map_scroll += 1;
+                        let map_lines = app.render_map();
+                        let max_scroll = map_lines.len().saturating_sub(25).max(0) as u16;
+                        if app.map_scroll < max_scroll {
+                            app.map_scroll += 1;
+                        }
+                    } else if app.show_stats {
+                        if app.stats_scroll < 20 { // Allow more scrolling to reach all regions
+                            app.stats_scroll += 1;
+                        }
                     } else if app.selected_index < app.prefectures.len() - 1 {
                         app.selected_index += 1;
                         app.list_state.select(Some(app.selected_index));
@@ -648,6 +749,18 @@ fn run_app<B: Backend>(
                     app.set_prefecture_level(5);
                     app.save_progress()?;
                 }
+                KeyCode::Char('e') => {
+                    match app.export_to_json() {
+                        Ok(_) => {}, // Success - could show a notification
+                        Err(_) => {}, // Error - could show error message
+                    }
+                }
+                KeyCode::Char('x') => {
+                    match app.export_to_csv() {
+                        Ok(_) => {}, // Success - could show a notification
+                        Err(_) => {}, // Error - could show error message
+                    }
+                }
                 _ => {}
             }
         }
@@ -681,13 +794,12 @@ fn render_list_view(f: &mut Frame, app: &JTermApp) {
         .iter()
         .map(|prefecture| {
             let level = app.get_prefecture_level(&prefecture.name_en);
-            let color = JTermApp::get_level_color(level);
             
             ListItem::new(format!(
                 "{} ({}) - Level {}",
                 prefecture.name_en, prefecture.name_jp, level
             ))
-            .style(Style::default().fg(color))
+            .style(Style::default().fg(FlexokiTheme::TX))
         })
         .collect();
 
@@ -710,7 +822,6 @@ fn render_list_view(f: &mut Frame, app: &JTermApp) {
     if let Some(selected_prefecture) = app.prefectures.get(app.selected_index) {
         let level = app.get_prefecture_level(&selected_prefecture.name_en);
         let level_text = JTermApp::get_level_text(level);
-        let color = JTermApp::get_level_color(level);
 
         let info_text = format!(
             "Prefecture: {}\nJapanese: {}\nRegion: {}\n\nCurrent Level: {} - {}\n\nPress 0-5 to set experience level",
@@ -728,7 +839,7 @@ fn render_list_view(f: &mut Frame, app: &JTermApp) {
                     .border_set(border::ROUNDED)
                     .title("Prefecture Info")
             )
-            .style(Style::default().fg(color))
+            .style(Style::default().fg(FlexokiTheme::TX))
             .wrap(Wrap { trim: true });
 
         f.render_widget(info_paragraph, right_chunks[0]);
@@ -774,27 +885,22 @@ fn render_stats_view(f: &mut Frame, app: &JTermApp) {
     let bar_width: usize = 20;
     let filled_segments = (completion_percentage / 5) as usize;
     
-    // Create different colored segments based on completion level
-    let progress_bar = if completion_percentage >= 80 {
-        format!("🟩{}🟨{}🟧{}🟥{}", 
-            "█".repeat((filled_segments.min(16)).saturating_sub(12).max(0)),
-            "█".repeat((filled_segments.min(12)).saturating_sub(8).max(0)), 
-            "█".repeat((filled_segments.min(8)).saturating_sub(4).max(0)),
-            "█".repeat(filled_segments.min(4)))
-    } else if completion_percentage >= 60 {
-        format!("🟨{}🟧{}🟥{}", 
-            "█".repeat((filled_segments.min(12)).saturating_sub(8).max(0)),
-            "█".repeat((filled_segments.min(8)).saturating_sub(4).max(0)),
-            "█".repeat(filled_segments.min(4)))
-    } else if completion_percentage >= 40 {
-        format!("🟧{}🟥{}", 
-            "█".repeat((filled_segments.min(8)).saturating_sub(4).max(0)),
-            "█".repeat(filled_segments.min(4)))
-    } else if completion_percentage >= 20 {
-        format!("🟥{}", "█".repeat(filled_segments.min(4)))
+    // Create colored progress bar characters based on completion percentage
+    let (filled_char, empty_char) = if completion_percentage < 20 {
+        ("🟥", "⬜") // Red for less than 20%
+    } else if completion_percentage < 50 {
+        ("🟨", "⬜") // Yellow for 20-49%
+    } else if completion_percentage < 75 {
+        ("🟦", "⬜") // Blue for 50-74%
     } else {
-        "🟩🟨🟧🟥".to_string()
+        ("🟩", "⬜") // Green for 75%+
     };
+    
+    let progress_bar = format!(
+        "{}{}",
+        filled_char.repeat(filled_segments),
+        empty_char.repeat(bar_width.saturating_sub(filled_segments))
+    );
 
     let overall_text = format!(
         "📊 TRAVEL STATISTICS\n\n\
@@ -802,7 +908,7 @@ fn render_stats_view(f: &mut Frame, app: &JTermApp) {
         Visited: {} / {} ({}%)\n\
         Total Score: {}\n\
         Max Possible: {}\n\n\
-        {}{}  {}%",
+        {}  {}%",
         stats.total_prefectures,
         visited_count,
         stats.total_prefectures,
@@ -810,7 +916,6 @@ fn render_stats_view(f: &mut Frame, app: &JTermApp) {
         stats.total_score,
         stats.total_prefectures * 5,
         progress_bar,
-        "░".repeat(bar_width.saturating_sub(filled_segments)),
         completion_percentage
     );
 
@@ -821,7 +926,7 @@ fn render_stats_view(f: &mut Frame, app: &JTermApp) {
                 .border_set(border::ROUNDED)
                 .title("Overall Progress")
         )
-        .style(Style::default().fg(Color::White))
+        .style(Style::default().fg(FlexokiTheme::TX))
         .wrap(Wrap { trim: true });
 
     f.render_widget(overall_paragraph, top_chunks[0]);
@@ -852,7 +957,7 @@ fn render_stats_view(f: &mut Frame, app: &JTermApp) {
                 .border_set(border::ROUNDED)
                 .title("Level Breakdown")
         )
-        .style(Style::default().fg(Color::Cyan))
+        .style(Style::default().fg(FlexokiTheme::CY))
         .wrap(Wrap { trim: true });
 
     f.render_widget(level_paragraph, top_chunks[1]);
@@ -860,13 +965,13 @@ fn render_stats_view(f: &mut Frame, app: &JTermApp) {
     // Regional breakdown
     let bottom_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(60), Constraint::Percentage(40)].as_ref())
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)].as_ref())
         .split(chunks[1]);
 
     let mut region_lines = vec!["🗾 REGIONAL PROGRESS\n".to_string()];
     
     // Define region order for better geographical organization
-    let region_order = vec!["Hokkaido", "Tohoku", "Kanto", "Chubu", "Kansai", "Chugoku", "Shikoku", "Kyushu"];
+    let region_order = vec!["Hokkaido", "Tohoku", "Kanto", "Chubu", "Kansai", "Chugoku", "Shikoku", "Kyushu", "Okinawa"];
     
     for region_name in region_order {
         if let Some((visited, total)) = stats.region_stats.get(region_name) {
@@ -884,6 +989,7 @@ fn render_stats_view(f: &mut Frame, app: &JTermApp) {
                 "Chugoku" => "🌊",
                 "Shikoku" => "🍊",
                 "Kyushu" => "🌋",
+                "Okinawa" => "🏝️",
                 _ => "🗾",
             };
             
@@ -914,16 +1020,17 @@ fn render_stats_view(f: &mut Frame, app: &JTermApp) {
                 .border_set(border::ROUNDED)
                 .title("Regional Breakdown")
         )
-        .style(Style::default().fg(Color::Green))
-        .wrap(Wrap { trim: true });
+        .style(Style::default().fg(FlexokiTheme::GR))
+        .wrap(Wrap { trim: true })
+        .scroll((app.stats_scroll, 0));
 
     f.render_widget(region_paragraph, bottom_chunks[0]);
 
     // Help section
     let help_text = if app.show_help {
-        "Stats View Controls:\n\n↑/↓ or j/k: Navigate (still works)\n0-5: Set experience level\ns: Back to list view\nm: Map view\nh/F1: Toggle this help\nq: Quit\n\nYour progress is automatically saved!"
+        "Stats View Controls:\n\n↑/↓ or j/k: Navigate/scroll\n0-5: Set experience level\ns: Back to list view\nm: Map view\nh/F1: Toggle this help\ne: Export to JSON\nx: Export to CSV\nq: Quit\n\nExports saved to home directory\nYour progress is automatically saved!"
     } else {
-        "Press 's' for list view\nPress 'm' for map view\nPress 'h' for help\n\nKeep exploring Japan! 🗾"
+        "Press 's' for list view\nPress 'm' for map view\nPress 'h' for help\ne: Export JSON\nx: Export CSV\n\nKeep exploring Japan! 🗾"
     };
 
     let help_paragraph = Paragraph::new(help_text)
@@ -1043,7 +1150,6 @@ fn render_map_view(f: &mut Frame, app: &JTermApp) {
     if let Some(selected_prefecture) = app.prefectures.get(app.map_selected_index) {
         let level = app.get_prefecture_level(&selected_prefecture.name_en);
         let level_text = JTermApp::get_level_text(level);
-        let color = JTermApp::get_level_color(level);
 
         let info_text = format!(
             "Selected:\n{} ({})\n\nRegion: {}\n\nLevel: {} - {}\n\nKanji: {}\n\nPress 0-5 to set level",
@@ -1062,7 +1168,7 @@ fn render_map_view(f: &mut Frame, app: &JTermApp) {
                     .border_set(border::ROUNDED)
                     .title("Prefecture Info")
             )
-            .style(Style::default().fg(color))
+            .style(Style::default().fg(FlexokiTheme::TX))
             .wrap(Wrap { trim: true });
 
         f.render_widget(info_paragraph, right_chunks[0]);
