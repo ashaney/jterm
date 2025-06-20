@@ -12,6 +12,7 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
     Frame, Terminal,
 };
+use ratatui_image::{picker::Picker, StatefulImage, protocol::StatefulProtocol};
 
 // Flexoki Light theme colors
 #[allow(dead_code)]
@@ -88,6 +89,9 @@ struct JTermApp {
     map_scroll: u16,
     map_selected_index: usize,
     stats_scroll: u16,
+    prefecture_scroll: u16,
+    image_picker: Option<Picker>,
+    japan_map_image: Option<Box<dyn StatefulProtocol>>,
 }
 
 impl JTermApp {
@@ -111,7 +115,40 @@ impl JTermApp {
             map_scroll: 0,
             map_selected_index: 0,
             stats_scroll: 0,
+            prefecture_scroll: 0,
+            image_picker: None,
+            japan_map_image: None,
         })
+    }
+
+    fn init_japan_map(&mut self) -> io::Result<()> {
+        // Initialize image picker with auto-detected font size and protocol
+        let mut picker = Picker::from_termios().unwrap_or_else(|_| {
+            // Use Ghostty terminal's font size (17pt) - assuming 17pt ≈ (11, 22) pixels
+            Picker::new((11, 22).into())
+        });
+        
+        // Try to load the transparent PNG file
+        let img_path = "img/japanex_jterm.png";
+        
+        // Check if file exists first
+        if !std::path::Path::new(img_path).exists() {
+            return Ok(());
+        }
+        
+        // Load PNG directly using image crate
+        match image::open(img_path) {
+            Ok(dynamic_img) => {
+                // Create ratatui-image protocol with resize
+                let image = picker.new_resize_protocol(dynamic_img);
+                
+                self.image_picker = Some(picker);
+                self.japan_map_image = Some(image);
+            }
+            Err(_) => return Ok(()), // Skip if image loading fails
+        }
+        
+        Ok(())
     }
 
     fn get_level_color(level: u8) -> Color {
@@ -643,6 +680,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = Terminal::new(backend)?;
 
     let mut app = JTermApp::new()?;
+    let _ = app.init_japan_map(); // Initialize Japan map image (ignore errors)
     let res = run_app(&mut terminal, &mut app);
 
     disable_raw_mode()?;
@@ -695,6 +733,10 @@ fn run_app<B: Backend>(
                         if app.stats_scroll > 0 {
                             app.stats_scroll -= 1;
                         }
+                    } else if app.show_alt_map {
+                        if app.prefecture_scroll > 0 {
+                            app.prefecture_scroll -= 1;
+                        }
                     } else if app.selected_index > 0 {
                         app.selected_index -= 1;
                         app.list_state.select(Some(app.selected_index));
@@ -710,6 +752,13 @@ fn run_app<B: Backend>(
                     } else if app.show_stats {
                         if app.stats_scroll < 20 { // Allow more scrolling to reach all regions
                             app.stats_scroll += 1;
+                        }
+                    } else if app.show_alt_map {
+                        // Calculate max scroll for prefecture list (47 items - visible height)
+                        let visible_height = 20; // Approximate visible height in the sidebar
+                        let max_scroll = app.prefectures.len().saturating_sub(visible_height).max(0) as u16;
+                        if app.prefecture_scroll < max_scroll {
+                            app.prefecture_scroll += 1;
                         }
                     } else if app.selected_index < app.prefectures.len() - 1 {
                         app.selected_index += 1;
@@ -776,7 +825,7 @@ fn run_app<B: Backend>(
     }
 }
 
-fn ui(f: &mut Frame, app: &JTermApp) {
+fn ui(f: &mut Frame, app: &mut JTermApp) {
     if app.show_map {
         render_map_view(f, app);
     } else if app.show_stats {
@@ -793,7 +842,7 @@ fn ui(f: &mut Frame, app: &JTermApp) {
     }
 }
 
-fn render_list_view(f: &mut Frame, app: &JTermApp) {
+fn render_list_view(f: &mut Frame, app: &mut JTermApp) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .margin(1)
@@ -810,7 +859,7 @@ fn render_list_view(f: &mut Frame, app: &JTermApp) {
                 "{} ({}) - Level {}",
                 prefecture.name_en, prefecture.name_jp, level
             ))
-            .style(Style::default().fg(FlexokiTheme::TX))
+            .style(Style::default().fg(JTermApp::get_level_color(level)))
         })
         .collect();
 
@@ -874,7 +923,7 @@ fn render_list_view(f: &mut Frame, app: &JTermApp) {
     f.render_widget(help_paragraph, right_chunks[1]);
 }
 
-fn render_stats_view(f: &mut Frame, app: &JTermApp) {
+fn render_stats_view(f: &mut Frame, app: &mut JTermApp) {
     let stats = app.calculate_stats();
     
     let chunks = Layout::default()
@@ -1056,169 +1105,202 @@ fn render_stats_view(f: &mut Frame, app: &JTermApp) {
     f.render_widget(help_paragraph, bottom_chunks[1]);
 }
 
-fn render_alt_map_view(f: &mut Frame, app: &JTermApp) {
+fn render_alt_map_view(f: &mut Frame, app: &mut JTermApp) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .margin(1)
         .constraints([Constraint::Percentage(75), Constraint::Percentage(25)].as_ref())
         .split(f.area());
     
-    // Create a geographical layout of Japan using colored squares
-    let mut map_grid = vec![vec![" ".to_string(); 60]; 20]; // Adjusted for side-by-side layout
-    
-    // Helper function to get colored square for prefecture
-    let get_color_square = |name: &str| -> String {
-        let level = app.get_prefecture_level(name);
-        match level {
-            0 => "⬜".to_string(),
-            1 => "🟥".to_string(),
-            2 => "🟨".to_string(),
-            3 => "🟩".to_string(),
-            4 => "🟪".to_string(),
-            5 => "🟦".to_string(),
-            _ => "⬜".to_string(),
+    // Try to render the SVG image if available
+    if let Some(ref mut image) = app.japan_map_image {
+        let map_block = Block::default()
+            .borders(Borders::ALL)
+            .border_set(border::ROUNDED)
+            .title("🗾 Japan Reference Map");
+        
+        // Calculate inner area for the image (inside the border)
+        let inner_area = map_block.inner(chunks[0]);
+        f.render_widget(map_block, chunks[0]);
+        f.render_stateful_widget(StatefulImage::new(None), inner_area, image);
+        
+        // Create prefecture list sidebar
+        render_prefecture_sidebar(f, app, chunks[1]);
+    } else {
+        // Fallback to the original colored squares implementation
+        let mut map_grid = vec![vec![" ".to_string(); 60]; 20];
+        
+        // Helper function to get colored square for prefecture
+        let get_color_square = |name: &str| -> String {
+            let level = app.get_prefecture_level(name);
+            match level {
+                0 => "⬜".to_string(),
+                1 => "🟥".to_string(),
+                2 => "🟨".to_string(),
+                3 => "🟩".to_string(),
+                4 => "🟪".to_string(),
+                5 => "🟦".to_string(),
+                _ => "⬜".to_string(),
+            }
+        };
+        
+        // Shift everything right by ~15 spaces to center the map
+        let offset_x = 15;
+        
+        // Hokkaido (far north, centered)
+        map_grid[1][30 + offset_x] = get_color_square("Hokkaido");
+        
+        // Tohoku (northern Honshu, spread horizontally)
+        map_grid[3][28 + offset_x] = get_color_square("Aomori");
+        map_grid[4][32 + offset_x] = get_color_square("Iwate");
+        map_grid[4][24 + offset_x] = get_color_square("Akita");
+        map_grid[5][28 + offset_x] = get_color_square("Miyagi");
+        map_grid[5][24 + offset_x] = get_color_square("Yamagata");
+        map_grid[6][28 + offset_x] = get_color_square("Fukushima");
+        
+        // Kanto (Tokyo area, horizontally spread)
+        map_grid[7][24 + offset_x] = get_color_square("Tochigi");
+        map_grid[7][28 + offset_x] = get_color_square("Ibaraki");
+        map_grid[7][20 + offset_x] = get_color_square("Gunma");
+        map_grid[8][22 + offset_x] = get_color_square("Saitama");
+        map_grid[8][26 + offset_x] = get_color_square("Tokyo");
+        map_grid[8][30 + offset_x] = get_color_square("Chiba");
+        map_grid[9][26 + offset_x] = get_color_square("Kanagawa");
+        
+        // Chubu (central Japan, wide spread)
+        map_grid[6][18 + offset_x] = get_color_square("Niigata");
+        map_grid[8][14 + offset_x] = get_color_square("Toyama");
+        map_grid[8][10 + offset_x] = get_color_square("Ishikawa");
+        map_grid[9][10 + offset_x] = get_color_square("Fukui");
+        map_grid[8][18 + offset_x] = get_color_square("Nagano");
+        map_grid[9][22 + offset_x] = get_color_square("Yamanashi");
+        map_grid[9][14 + offset_x] = get_color_square("Gifu");
+        map_grid[10][22 + offset_x] = get_color_square("Shizuoka");
+        map_grid[10][14 + offset_x] = get_color_square("Aichi");
+        
+        // Kansai (Kyoto/Osaka area, spread wide)
+        map_grid[10][10 + offset_x] = get_color_square("Mie");
+        map_grid[9][8 + offset_x] = get_color_square("Shiga");
+        map_grid[8][6 + offset_x] = get_color_square("Kyoto");
+        map_grid[9][4 + offset_x] = get_color_square("Osaka");
+        map_grid[9][2 + offset_x] = get_color_square("Hyogo");
+        map_grid[10][6 + offset_x] = get_color_square("Nara");
+        map_grid[11][4 + offset_x] = get_color_square("Wakayama");
+        
+        // Chugoku (western Honshu, very wide)
+        map_grid[8][2 + offset_x] = get_color_square("Tottori");
+        map_grid[10][0 + offset_x] = get_color_square("Shimane");
+        map_grid[10][2 + offset_x] = get_color_square("Okayama");
+        map_grid[11][2 + offset_x] = get_color_square("Hiroshima");
+        map_grid[12][0 + offset_x] = get_color_square("Yamaguchi");
+        
+        // Shikoku (southern island, horizontally spread)
+        map_grid[12][4 + offset_x] = get_color_square("Kagawa");
+        map_grid[12][8 + offset_x] = get_color_square("Tokushima");
+        map_grid[12][2 + offset_x] = get_color_square("Ehime");
+        map_grid[13][4 + offset_x] = get_color_square("Kochi");
+        
+        // Kyushu (southwestern island, wide cluster)
+        map_grid[14][0 + offset_x] = get_color_square("Fukuoka");
+        map_grid[15][0 + offset_x] = get_color_square("Saga");
+        map_grid[16][0 + offset_x] = get_color_square("Nagasaki");
+        map_grid[15][2 + offset_x] = get_color_square("Kumamoto");
+        map_grid[14][4 + offset_x] = get_color_square("Oita");
+        map_grid[16][2 + offset_x] = get_color_square("Miyazaki");
+        map_grid[17][0 + offset_x] = get_color_square("Kagoshima");
+        
+        // Okinawa (far south)
+        map_grid[19][0 + offset_x] = get_color_square("Okinawa");
+        
+        // Convert grid to string
+        let mut map_lines = Vec::new();
+        
+        for row in &map_grid {
+            let line: String = row.iter().cloned().collect();
+            map_lines.push(line);
         }
-    };
-    
-    // Shift everything right by ~15 spaces to center the map
-    let offset_x = 15;
-    
-    // Hokkaido (far north, centered)
-    map_grid[1][30 + offset_x] = get_color_square("Hokkaido");
-    
-    // Tohoku (northern Honshu, spread horizontally)
-    map_grid[3][28 + offset_x] = get_color_square("Aomori");
-    map_grid[4][32 + offset_x] = get_color_square("Iwate");
-    map_grid[4][24 + offset_x] = get_color_square("Akita");
-    map_grid[5][28 + offset_x] = get_color_square("Miyagi");
-    map_grid[5][24 + offset_x] = get_color_square("Yamagata");
-    map_grid[6][28 + offset_x] = get_color_square("Fukushima");
-    
-    // Kanto (Tokyo area, horizontally spread)
-    map_grid[7][24 + offset_x] = get_color_square("Tochigi");
-    map_grid[7][28 + offset_x] = get_color_square("Ibaraki");
-    map_grid[7][20 + offset_x] = get_color_square("Gunma");
-    map_grid[8][22 + offset_x] = get_color_square("Saitama");
-    map_grid[8][26 + offset_x] = get_color_square("Tokyo");
-    map_grid[8][30 + offset_x] = get_color_square("Chiba");
-    map_grid[9][26 + offset_x] = get_color_square("Kanagawa");
-    
-    // Chubu (central Japan, wide spread)
-    map_grid[6][18 + offset_x] = get_color_square("Niigata");
-    map_grid[8][14 + offset_x] = get_color_square("Toyama");
-    map_grid[8][10 + offset_x] = get_color_square("Ishikawa");
-    map_grid[9][10 + offset_x] = get_color_square("Fukui");
-    map_grid[8][18 + offset_x] = get_color_square("Nagano");
-    map_grid[9][22 + offset_x] = get_color_square("Yamanashi");
-    map_grid[9][14 + offset_x] = get_color_square("Gifu");
-    map_grid[10][22 + offset_x] = get_color_square("Shizuoka");
-    map_grid[10][14 + offset_x] = get_color_square("Aichi");
-    
-    // Kansai (Kyoto/Osaka area, spread wide)
-    map_grid[10][10 + offset_x] = get_color_square("Mie");
-    map_grid[9][8 + offset_x] = get_color_square("Shiga");
-    map_grid[8][6 + offset_x] = get_color_square("Kyoto");
-    map_grid[9][4 + offset_x] = get_color_square("Osaka");
-    map_grid[9][2 + offset_x] = get_color_square("Hyogo");
-    map_grid[10][6 + offset_x] = get_color_square("Nara");
-    map_grid[11][4 + offset_x] = get_color_square("Wakayama");
-    
-    // Chugoku (western Honshu, very wide)
-    map_grid[8][2 + offset_x] = get_color_square("Tottori");
-    map_grid[10][0 + offset_x] = get_color_square("Shimane");
-    map_grid[10][2 + offset_x] = get_color_square("Okayama");
-    map_grid[11][2 + offset_x] = get_color_square("Hiroshima");
-    map_grid[12][0 + offset_x] = get_color_square("Yamaguchi");
-    
-    // Shikoku (southern island, horizontally spread)
-    map_grid[12][4 + offset_x] = get_color_square("Kagawa");
-    map_grid[12][8 + offset_x] = get_color_square("Tokushima");
-    map_grid[12][2 + offset_x] = get_color_square("Ehime");
-    map_grid[13][4 + offset_x] = get_color_square("Kochi");
-    
-    // Kyushu (southwestern island, wide cluster)
-    map_grid[14][0 + offset_x] = get_color_square("Fukuoka");
-    map_grid[15][0 + offset_x] = get_color_square("Saga");
-    map_grid[16][0 + offset_x] = get_color_square("Nagasaki");
-    map_grid[15][2 + offset_x] = get_color_square("Kumamoto");
-    map_grid[14][4 + offset_x] = get_color_square("Oita");
-    map_grid[16][2 + offset_x] = get_color_square("Miyazaki");
-    map_grid[17][0 + offset_x] = get_color_square("Kagoshima");
-    
-    // Okinawa (far south)
-    map_grid[19][0 + offset_x] = get_color_square("Okinawa");
-    
-    // Convert grid to string
-    let mut map_lines = Vec::new();
-    
-    for row in &map_grid {
-        let line: String = row.iter().cloned().collect();
-        map_lines.push(line);
+        
+        let map_text = map_lines.join("\n");
+        
+        let map_paragraph = Paragraph::new(map_text)
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_set(border::ROUNDED)
+                    .title("🗾 Japan Overview Map (Fallback)")
+            )
+            .style(Style::default().fg(FlexokiTheme::TX))
+            .wrap(Wrap { trim: false });
+        
+        f.render_widget(map_paragraph, chunks[0]);
+        
+        // Create prefecture list sidebar for fallback too
+        render_prefecture_sidebar(f, app, chunks[1]);
     }
-    
-    let map_text = map_lines.join("\n");
-    
-    let map_paragraph = Paragraph::new(map_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_set(border::ROUNDED)
-                .title("🗾 Japan Overview Map")
-        )
-        .style(Style::default().fg(FlexokiTheme::TX))
-        .wrap(Wrap { trim: false });
-    
-    f.render_widget(map_paragraph, chunks[0]);
-    
-    // Stats panel on the right
-    let stats = app.calculate_stats();
-    let visited_count = stats.total_prefectures - stats.level_counts[0];
-    let completion_percentage = (visited_count as f64 / stats.total_prefectures as f64 * 100.0) as u32;
-    
-    let stats_text = format!(
-        "📊 STATISTICS\n\n\
-        Total: {}\n\
-        Visited: {}\n\
-        Progress: {}%\n\n\
-        🟦 Lived: {}\n\
-        🟪 Stayed: {}\n\
-        🟩 Visited: {}\n\
-        🟨 Alighted: {}\n\
-        🟥 Passed: {}\n\
-        ⬜ Never: {}\n\n\
-        Legend:\n\
-        ⬜ Never been\n\
-        🟥 Passed there\n\
-        🟨 Alighted there\n\
-        🟩 Visited there\n\
-        🟪 Stayed there\n\
-        🟦 Lived there\n\n\
-        Press 'w' to return",
-        stats.total_prefectures,
-        visited_count,
-        completion_percentage,
-        stats.level_counts[5],
-        stats.level_counts[4],
-        stats.level_counts[3],
-        stats.level_counts[2],
-        stats.level_counts[1],
-        stats.level_counts[0]
-    );
-    
-    let stats_paragraph = Paragraph::new(stats_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_set(border::ROUNDED)
-                .title("Statistics & Legend")
-        )
-        .style(Style::default().fg(FlexokiTheme::TX))
-        .wrap(Wrap { trim: true });
-    
-    f.render_widget(stats_paragraph, chunks[1]);
 }
 
-fn render_detail_popup(f: &mut Frame, app: &JTermApp) {
+fn render_prefecture_sidebar(f: &mut Frame, app: &mut JTermApp, area: ratatui::layout::Rect) {
+    // Prefecture names in order from Hokkaido to Okinawa
+    let prefecture_order = vec![
+        // Hokkaido
+        "Hokkaido",
+        // Tohoku
+        "Aomori", "Iwate", "Akita", "Miyagi", "Yamagata", "Fukushima",
+        // Kanto
+        "Ibaraki", "Tochigi", "Gunma", "Saitama", "Tokyo", "Chiba", "Kanagawa",
+        // Chubu
+        "Niigata", "Toyama", "Ishikawa", "Fukui", "Yamanashi", "Nagano", "Gifu", "Shizuoka", "Aichi",
+        // Kansai
+        "Mie", "Shiga", "Kyoto", "Osaka", "Hyogo", "Nara", "Wakayama",
+        // Chugoku
+        "Tottori", "Shimane", "Okayama", "Hiroshima", "Yamaguchi",
+        // Shikoku
+        "Tokushima", "Kagawa", "Ehime", "Kochi",
+        // Kyushu
+        "Fukuoka", "Saga", "Nagasaki", "Kumamoto", "Oita", "Miyazaki", "Kagoshima",
+        // Okinawa
+        "Okinawa",
+    ];
+
+    // Create separate lines for each prefecture
+    let mut lines = Vec::new();
+    for prefecture_name in prefecture_order.iter() {
+        if let Some(prefecture) = app.prefectures.iter().find(|p| p.name_en == *prefecture_name) {
+            let level = app.get_prefecture_level(&prefecture.name_en);
+            let level_text = match level {
+                0 => "○",
+                1 => "1", 
+                2 => "2",
+                3 => "3", 
+                4 => "4",
+                5 => "5",
+                _ => "?",
+            };
+            
+            let color = JTermApp::get_level_color(level);
+            let text = format!("{} {}", level_text, prefecture.name_jp);
+            
+            lines.push(ratatui::text::Line::from(vec![
+                ratatui::text::Span::styled(text, Style::default().fg(color))
+            ]));
+        }
+    }
+    
+    let prefecture_paragraph = Paragraph::new(lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_set(border::ROUNDED)
+                .title("🗾 Prefecture List")
+        )
+        .wrap(Wrap { trim: true })
+        .scroll((app.prefecture_scroll, 0));
+    
+    f.render_widget(prefecture_paragraph, area);
+}
+
+
+fn render_detail_popup(f: &mut Frame, app: &mut JTermApp) {
     let area = f.area();
     
     // Create a centered popup area
@@ -1281,7 +1363,7 @@ fn render_detail_popup(f: &mut Frame, app: &JTermApp) {
     }
 }
 
-fn render_map_view(f: &mut Frame, app: &JTermApp) {
+fn render_map_view(f: &mut Frame, app: &mut JTermApp) {
     let chunks = Layout::default()
         .direction(Direction::Horizontal)
         .margin(1)
